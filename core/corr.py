@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
-from utils.utils import bilinear_sampler, coords_grid
+
+from .utils.utils import bilinear_sampler, coords_grid
 
 try:
     import alt_cuda_corr
@@ -36,7 +37,7 @@ class CorrBlock:
             corr = self.corr_pyramid[i]
             dx = torch.linspace(-r, r, 2*r+1, device=coords.device)
             dy = torch.linspace(-r, r, 2*r+1, device=coords.device)
-            delta = torch.stack(torch.meshgrid(dy, dx), axis=-1)
+            delta = torch.stack(torch.meshgrid([dy, dx], indexing = "ij"), axis=-1)
 
             centroid_lvl = coords.reshape(batch*h1*w1, 1, 1, 2) / 2**i
             delta_lvl = delta.view(1, 2*r+1, 2*r+1, 2)

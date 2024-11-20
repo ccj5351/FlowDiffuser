@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-from corr import CorrBlock
+from .corr import CorrBlock
 
 
 # --- transformer modules
@@ -414,37 +414,6 @@ class SKMotionEncoder6_Deep_nopool_res(nn.Module):
         out = self.conv(cor_flo)
 
         return torch.cat([out, flow], dim=1)
-
-
-class SKUpdateBlock6_Deep_nopoolres_AllDecoder(nn.Module):
-    def __init__(self, args, hidden_dim):
-        super().__init__()
-        self.args = args
-        self.encoder = SKMotionEncoder6_Deep_nopool_res(args)
-        self.gru = PCBlock4_Deep_nopool_res(128+hidden_dim+hidden_dim+128, 128, k_conv=args.PCUpdater_conv)
-        self.flow_head = PCBlock4_Deep_nopool_res(128, 2, k_conv=args.k_conv)
-
-        self.mask = nn.Sequential(
-            nn.Conv2d(128, 256, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 64*9, 1, padding=0))
-
-        self.aggregator = Aggregate(args=self.args, dim=128, dim_head=128, heads=self.args.num_heads)
-
-    def forward(self, net, inp, corr, flow, attention):
-        motion_features = self.encoder(flow, corr)
-        motion_features_global = self.aggregator(attention, motion_features)
-        inp_cat = torch.cat([inp, motion_features, motion_features_global], dim=1)
-
-        # Attentional update
-        net = self.gru(torch.cat([net, inp_cat], dim=1))
-
-        delta_flow = self.flow_head(net)
-
-        # scale mask to balence gradients
-        mask = .25 * self.mask(net)
-        return net, mask, delta_flow
-
 
 class Aggregator(nn.Module):
     def __init__(self, args, chnn, heads=1):

@@ -1,6 +1,6 @@
-from __future__ import print_function, division
+#from __future__ import print_function, division
 import sys
-sys.path.append('core')
+#sys.path.append('core')
 
 import argparse
 import os
@@ -15,13 +15,15 @@ import torch.optim as optim
 import torch.nn.functional as F
 
 from torch.utils.data import DataLoader
-import evaluate
-import datasets
-from flowdiffuser import FlowDiffuser
 
 from torch.utils.tensorboard import SummaryWriter
 
 from torch.cuda.amp import GradScaler
+
+
+from . import evaluate
+from core import datasets
+from core.flowdiffuser import FlowDiffuser
 
 
 # exclude extremly large displacements
@@ -141,7 +143,6 @@ def train(args):
     logger = Logger(model, scheduler)
 
     VAL_FREQ = 5000
-    add_noise = True
 
     should_keep_training = True
     while should_keep_training:

@@ -135,3 +135,20 @@ def read_gen(file_name, pil=False):
         else:
             return flow[:, :, :-1]
     return []
+
+# Write some Text
+def add_text_to_image(text_str, posi, img, fontScale= 0.5, fontColor = (255,255,255)):
+    font                   = cv2.FONT_HERSHEY_SIMPLEX
+    bottomLeftCornerOfText = posi #(10,500)
+    #fontScale              = 0.5
+    #fontColor              = (255,255,255)
+    thickness              = 1
+    lineType               = 2
+    cv2.putText(img, text_str, 
+        bottomLeftCornerOfText, 
+        font, 
+        fontScale,
+        fontColor,
+        thickness,
+        lineType)
+    return img

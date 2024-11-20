@@ -2,15 +2,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from functools import partial
 
-from corr import CorrBlock
-from utils.utils import coords_grid
+from .corr import CorrBlock
+from .utils.utils import coords_grid
 
-from fd_encoder import twins_svt_large, twins_svt_small_context
-from fd_decoder import UpSampleMask8, UpSampleMask4, TransformerModule, SKUpdate, SinusoidalPositionEmbeddings, SKUpdateDFM
-from fd_corr import CorrBlock_FD_Sp4
+from .fd_encoder import twins_svt_large, twins_svt_small_context
+from .fd_decoder import (
+    UpSampleMask8, UpSampleMask4, TransformerModule, 
+    SKUpdate, SinusoidalPositionEmbeddings, SKUpdateDFM
+    )
+from .fd_corr import CorrBlock_FD_Sp4
 
-autocast = torch.cuda.amp.autocast
+autocast = partial(torch.autocast, device_type="cuda")
 
 
 def exists(x):
@@ -82,22 +86,36 @@ class FlowDiffuser(nn.Module):
             timesteps = 1000
             sampling_timesteps = 4
             recurr_itrs = 6
-            print(' -- denoise steps: %d \n' % sampling_timesteps)
-            print(' -- recurrent iterations: %d \n' % recurr_itrs)
+            print(f' -- denoise steps: {sampling_timesteps:d} \n')
+            print(f' -- recurrent iterations: {recurr_itrs:d} \n')
 
             self.ddim_n = sampling_timesteps
             self.recurr_itrs = recurr_itrs
             self.n_sc = 0.1
+            
+            """
+            Despite the sensitivity of classification [6] and detection [5] 
+            tasks to the signal-to-noise ratio, our FlowDiffuser 
+            demonstrates insensitivity to this factor. 
+            We select b = 0.5 as the default setting, 
+            yielding slightly improved results. 
+            """
+            # i.e., here this scale is the signal-to-noise ratio scale factor `b` in the paper;
+            # see Tab 4 Ablation study. `b=0.5` is used;
             self.scale = nn.Parameter(torch.ones(1) * 0.5, requires_grad=False)
+
+            # the striding factor \lambda;
             self.n_lambda = 0.2
 
+
             self.objective = 'pred_x0'  
-            betas = cosine_beta_schedule(timesteps)
+            betas = cosine_beta_schedule(timesteps)# [T,]
             alphas = 1. - betas
             alphas_cumprod = torch.cumprod(alphas, dim=0)
             alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.)
             timesteps, = betas.shape
             self.num_timesteps = int(timesteps)
+
 
             self.sampling_timesteps = default(sampling_timesteps, timesteps)
             assert self.sampling_timesteps <= timesteps
@@ -128,7 +146,7 @@ class FlowDiffuser(nn.Module):
 
     def up_sample_flow8(self, flow, mask):
         B, _, H, W = flow.shape
-        flow = torch.nn.functional.unfold(8 * flow, kernel_size=[3, 3], stride=[1, 1], padding=[1, 1])
+        flow = F.unfold(8 * flow, kernel_size=[3, 3], stride=[1, 1], padding=[1, 1])
         flow = flow.reshape(B, 2, 9, 1, 1, H, W)
         mask = mask.reshape(B, 1, 9, 8, 8, H, W)
         mask = torch.softmax(mask, dim=2)
@@ -139,7 +157,7 @@ class FlowDiffuser(nn.Module):
 
     def up_sample_flow4(self, flow, mask):
         B, _, H, W = flow.shape
-        flow = torch.nn.functional.unfold(4 * flow, kernel_size=[3, 3], stride=[1, 1], padding=[1, 1])
+        flow = F.unfold(4 * flow, kernel_size=[3, 3], stride=[1, 1], padding=[1, 1])
         flow = flow.reshape(B, 2, 9, 1, 1, H, W)
         mask = mask.reshape(B, 1, 9, 4, 4, H, W)
         mask = torch.softmax(mask, dim=2)
@@ -184,7 +202,10 @@ class FlowDiffuser(nn.Module):
             flow = coords1 - coords0
             with autocast(enabled=self.args.mixed_precision):
                 dfm_params = [t_ii, self.update, ii, 0]  
-                net, delta_flow = self.update_dfm(net, inp8, corr, flow, itr, first_step=first_step, dfm_params=dfm_params)  
+                net, delta_flow = self.update_dfm(net, inp8, corr, 
+                                                flow, itr, first_step=first_step, 
+                                                dfm_params=dfm_params
+                                                )
                 up_mask = self.um8(net)
 
             coords1 = coords1 + delta_flow
@@ -218,22 +239,39 @@ class FlowDiffuser(nn.Module):
     @torch.no_grad()
     def _ddim_sample(self, feat_shape, net, inp, coords0, coords1_init, clip_denoised=True):
         batch, c, h, w = feat_shape
-        shape = (batch, 2, h, w)
-        total_timesteps, sampling_timesteps, eta, objective = self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective  
+        total_timesteps = self.num_timesteps
+        sampling_timesteps = self.sampling_timesteps  
+        #eta, objective = self.ddim_sampling_eta, self.objective  
+        # linspace: values are evenly spaced from start to end, inclusive.
         times = torch.linspace(-1, total_timesteps - 1, steps=sampling_timesteps + 1)
         times = list(reversed(times.int().tolist()))
         time_pairs = list(zip(times[:-1], times[1:])) 
-        x_in = torch.randn(shape, device=self.device)
+        x_in = torch.randn((batch, 2, h, w), device=self.device)
 
         flow_s = []
-        x_start = None
+        #x_start = None
         pred_s = None
+        # E.g., len(time_pairs) is 4,
+        # i.e., the denoising steps = 4;
         for i_ddim, time_s in enumerate(time_pairs):
             time, time_next = time_s
-            time_cond = torch.full((batch,), time, device=self.device, dtype=torch.long)
-            t_next = torch.full((batch,), time_next, device=self.device, dtype=torch.long)
-
-            x_pred, inner_flow_s, pred_s = self._model_predictions(x_in, time_cond, net, inp, coords0, coords1_init, i_ddim, pred_s, t_next)
+            time_cond = torch.full((batch,), fill_value=time, device=self.device, dtype=torch.long)
+            t_next = torch.full((batch,), fill_value=time_next, device=self.device, dtype=torch.long)
+            
+            # NOTE: ccj: each denoise sampling will do RAFT prediction once,
+            # (i.e., one RAFT prediction will do N=6 iteration via GRU)
+            # therefore, T times denoising smapling will do T*N GRU iterations in total;
+            x_pred, inner_flow_s, pred_s = self._model_predictions(
+                                                    x = x_in, t = time_cond, 
+                                                    net = net, 
+                                                    inp8 = inp, 
+                                                    coords0= coords0, 
+                                                    coords1 = coords1_init, 
+                                                    i_ddim = i_ddim, 
+                                                    pred_last= pred_s, 
+                                                    t_next = t_next
+                                                    )
+                
             flow_s = flow_s + inner_flow_s
 
             alpha = self.alphas_cumprod[time]
@@ -242,7 +280,11 @@ class FlowDiffuser(nn.Module):
             x_t = x_in 
             x_pred = x_pred * self.scale
             x_pred = torch.clamp(x_pred, min=-1 * self.scale, max=self.scale)
+            # DDIM (Denoising Diffusion Implicit Model): non-Markovian forward processes;
             eps = (1 / (1 - alpha).sqrt()) * (x_t - alpha.sqrt() * x_pred)
+            # see Eq 5. at https://openaccess.thecvf.com/content/CVPR2024/papers/Luo_FlowDiffuser_Advancing_Optical_Flow_Estimation_with_Diffusion_Models_CVPR_2024_paper.pdf
+            # claimed as "setting σ to 0 for all t instigates a deterministic generative process"
+            # Here to set \sigma_t to 0;
             x_next = alpha_next.sqrt() * x_pred + (1 - alpha_next).sqrt() * eps
             x_in = x_next
 
@@ -250,7 +292,11 @@ class FlowDiffuser(nn.Module):
 
         return coords1, net, flow_s
 
-    def _model_predictions(self, x, t, net, inp8, coords0, coords1, i_ddim, pred_last=None, t_next=None):
+    def _model_predictions(self, x, t, net, inp8, coords0, coords1, 
+                           i_ddim, pred_last=None, 
+                           t_next = None
+                        ):
+        
         x_flow = torch.clamp(x, min=-1, max=1)
         x_flow = x_flow * self.n_sc
         x_flow = x_flow * self.norm_const
@@ -262,9 +308,12 @@ class FlowDiffuser(nn.Module):
         coords1 = coords1 + x_flow.float()
 
         flow_s = []
+        #import pdb; pdb.set_trace()
         for ii in range(self.recurr_itrs):
+            # tensor.int, aka to(torch.int32)
             t_ii = (t - (t - 0) / self.recurr_itrs * ii).int()
-
+            
+            # here corr channel is C=324;
             corr = self.corr_fn(coords1)
             flow = coords1 - coords0
 
@@ -272,12 +321,17 @@ class FlowDiffuser(nn.Module):
                 itr = ii
                 first_step = False if itr != 0 else True
                 dfm_params = [t_ii, self.update, ii, 0]
-                net, delta_flow = self.update_dfm(net, inp8, corr, flow, itr, first_step=first_step, dfm_params=dfm_params)
-                up_mask = self.um8(net)
+                net, delta_flow = self.update_dfm(net, inp8, corr, 
+                                                flow, itr, first_step=first_step, 
+                                                dfm_params=dfm_params
+                                                )
+                up_mask = self.um8(net) #[B,C,H/8,W/8], C=576;
 
             coords1 = coords1 + delta_flow
 
-            flow = coords1 - coords0
+            flow = coords1 - coords0 # in size [B,2,H/8,W/8]
+            
+            # upsample from [H,W]*1/8 to [H,W], in size [B,2,H,W]
             flow_up = self.up_sample_flow8(flow, up_mask)
 
             flow_s.append(flow_up)
@@ -293,7 +347,10 @@ class FlowDiffuser(nn.Module):
                 extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
         )
 
-    def forward(self, image1, image2, test_mode=False, iters=None, flow_gt=None, flow_init=None):
+    def forward(self, image1, image2, test_mode=False, 
+                iters=None, flow_gt=None, 
+                flow_init=None
+            ):
 
         image1 = 2 * (image1 / 255.0) - 1.0
         image2 = 2 * (image2 / 255.0) - 1.0
@@ -323,32 +380,48 @@ class FlowDiffuser(nn.Module):
         flow_list = []
         if flow_init is not None: 
             if flow_init.shape[-2:] != coords1.shape[-2:]:
-                flow_init = F.interpolate(flow_init, coords1.shape[-2:], mode='bilinear', align_corners=True) * 0.5
+                flow_init = F.interpolate(flow_init, coords1.shape[-2:], 
+                                        mode='bilinear', align_corners=True) * 0.5
             coords1 = coords1 + flow_init
 
         if self.diffusion:
             self.corr_fn = corr_fn
             self.device = fmap1_8.device
             h, w = fmap1_8.shape[-2:] 
-            self.norm_const = torch.as_tensor([w, h], dtype=torch.float, device=self.device).view(1, 2, 1, 1)
+            self.norm_const = torch.as_tensor([w, h], dtype=torch.float, 
+                                            device=self.device).view(1, 2, 1, 1)
 
             if self.training:
                 coords1 = coords1.detach()
-                flow_up_s, coords1, net = self._train_dfm(fmap1_8.shape, flow_gt, net, inp8, coords0, coords1)
+                flow_up_s, coords1, net = self._train_dfm(feat_shape=fmap1_8.shape, 
+                                                         flow_gt=flow_gt, 
+                                                         net=net, 
+                                                         inp8=inp8, 
+                                                         coords0=coords0, 
+                                                         coords1=coords1
+                                                        )
             else: 
-                coords1, net, flow_up_s = self._ddim_sample(fmap1_8.shape, net, inp8, coords0, coords1)
+                coords1, net, flow_up_s = self._ddim_sample(feat_shape=fmap1_8.shape, 
+                                                            net= net, inp= inp8, 
+                                                            coords0=coords0, 
+                                                            coords1_init=coords1
+                                                        )
 
             if self.sp4:
-                flow4 = torch.nn.functional.interpolate(2 * (coords1 - coords0), scale_factor=2, mode='bilinear', align_corners=True)
+                flow4 = F.interpolate(2 * (coords1 - coords0), scale_factor=2, mode='bilinear', align_corners=True)
                 coords0, coords1 = self.initialize_flow4(image1)
                 coords0 = coords0.permute(0, 3, 1, 2).contiguous()
                 coords1 = coords1.permute(0, 3, 1, 2).contiguous()
                 coords1 = coords1 + flow4
 
-                net = torch.nn.functional.interpolate(net, scale_factor=2, mode='bilinear', align_corners=True)
+                net = F.interpolate(net, scale_factor=2, mode='bilinear', align_corners=True)
                 coords1_rd = ste_round(coords1)
                 
-                corr_fn4 = CorrBlock_FD_Sp4(fmap1_4, fmap2_4, num_levels=self.args.corr_levels, radius=self.args.corr_radius, coords_init=coords1_rd, rad=self.rad)
+                corr_fn4 = CorrBlock_FD_Sp4(fmap1_4, fmap2_4, num_levels=self.args.corr_levels, 
+                                            radius=self.args.corr_radius, 
+                                            coords_init=coords1_rd, 
+                                            rad=self.rad
+                                            )
 
                 for itr in range(self.args.iters_const6):
                     coords1 = coords1.detach()

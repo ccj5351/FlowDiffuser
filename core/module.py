@@ -1,14 +1,13 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
 import time
 import os
-from torch.nn.parameter import Parameter
 import math
 import numpy as np
 import cv2
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn.parameter import Parameter
 
 class KPAFlowDec(nn.Module):
     def __init__(self, args, chnn=128):
