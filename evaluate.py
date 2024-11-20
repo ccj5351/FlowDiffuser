@@ -308,7 +308,7 @@ if __name__ == '__main__':
             timeStamp = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
             csv_file = os.path.join(args.result_dir, f"{val_dataset}-err.csv")
             messg = timeStamp + f",model={args.model_name},resultDir,{args.result_dir}" + \
-                    f",dataset,{val_dataset},data_root,{args.data_dir}" + \
+                    f",dataset,{val_dataset},data_root,{args.data_dir}," + \
                     f",epe,{results['kitti-epe']},F1,{results['kitti-f1']}" + \
                     f",,Frames number {results['imgN']} for evalution\n"
 
