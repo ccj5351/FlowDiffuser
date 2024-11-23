@@ -258,9 +258,10 @@ class FlowDiffuser(nn.Module):
             time_cond = torch.full((batch,), fill_value=time, device=self.device, dtype=torch.long)
             t_next = torch.full((batch,), fill_value=time_next, device=self.device, dtype=torch.long)
             
-            # NOTE: ccj: each denoise sampling will do RAFT prediction once,
-            # (i.e., one RAFT prediction will do N=6 iteration via GRU)
-            # therefore, T times denoising smapling will do T*N GRU iterations in total;
+            # NOTE: CCJ: each denoise sampling will do RAFT prediction once,
+            # (but one RAFT prediction will do N=6 GRU iteration)
+            # therefore, T (e.g., T=4) times denoising smapling 
+            # will do T*N (e.g., = 24) GRU iterations in total;
             x_pred, inner_flow_s, pred_s = self._model_predictions(
                                                     x = x_in, t = time_cond, 
                                                     net = net, 
